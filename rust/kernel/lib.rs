@@ -56,6 +56,7 @@ pub mod error;
 pub mod file;
 pub mod fs;
 pub mod gpio;
+pub mod hid;
 pub mod hwrng;
 pub mod irq;
 pub mod kasync;
