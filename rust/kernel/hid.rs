@@ -4,6 +4,7 @@
 //!
 //! C header: [`include/linux/hid.h`](../../../../include/linux/hid.h)
 
+use core::ops::BitOr;
 use core::slice::from_raw_parts;
 
 use bindings::hid_report;
@@ -11,6 +12,7 @@ use bindings::hid_report;
 use crate::{
     bindings, device, driver,
     error::{from_kernel_result, Result},
+    pr_info, pr_warn,
     str::CStr,
     to_result, ThisModule,
 };
@@ -110,12 +112,60 @@ impl<T: Driver> Adapter<T> {
 }
 
 /// An HID device
-/// 
+///
 /// # Invariants
-/// 
+///
 /// The field `ptr` is non-null and valid for the lifetime of the object.
 pub struct Device {
     ptr: *mut bindings::hid_device,
+}
+
+///
+#[derive(Clone, Copy, Debug)]
+pub enum ConnectionRequest {
+    HidInput = 0,
+    HidInputForce = 1,
+    HidRaw = 2,
+    HidDev = 3,
+    HidDevForce = 4,
+    FF = 5,
+    Driver = 6,
+}
+
+pub struct ConnectionMask(core::ffi::c_uint);
+
+const fn bit(x: core::ffi::c_uint) -> core::ffi::c_uint {
+    1 << x
+}
+
+impl From<ConnectionRequest> for ConnectionMask {
+    fn from(req: ConnectionRequest) -> Self {
+        ConnectionMask(bit(req as core::ffi::c_uint))
+    }
+}
+
+// impl BitOr for ConnectionRequest {
+//     type Output = ConnectionMask;
+
+//     fn bitor(self, rhs: Self) -> Self::Output {
+//         ConnectionMask(bit(self as core::ffi::c_uint) | bit(rhs as core::ffi::c_uint))
+//     }
+// }
+
+// impl BitOr<ConnectionMask> for ConnectionRequest {
+//     type Output = ConnectionMask;
+
+//     fn bitor(self, rhs: ConnectionMask) -> Self::Output {
+//         ConnectionMask(bit(self as core::ffi::c_uint) | bit(rhs.0))
+//     }
+// }
+
+impl BitOr for ConnectionMask {
+    type Output = ConnectionMask;
+
+    fn bitor(self, rhs: ConnectionMask) -> Self::Output {
+        ConnectionMask(bit(self.0) | bit(rhs.0))
+    }
 }
 
 impl Device {
@@ -135,7 +185,61 @@ impl Device {
         // SAFETY: self.ptr has the same lifetime as self.
         unsafe { CStr::from_char_ptr((*self.ptr).name.as_ptr()) }
     }
+
+    pub fn parse(&self) -> Result {
+        // TODO melse: was hid_parse??
+        to_result(unsafe { bindings::hid_open_report(self.ptr) })
+    }
+
+    pub fn hw_start(&self, connect_mask: ConnectionMask) -> Result {
+        to_result(unsafe { bindings::hid_hw_start(self.ptr, connect_mask.0) })
+    }
+
+    pub fn hw_open(&self) -> Result {
+        to_result(unsafe { bindings::hid_hw_open(self.ptr) })
+    }
+
+    pub fn io_start(&mut self) {
+        let dev = unsafe { &mut *self.ptr };
+
+        // TODO melse: for some reason, this C function is static, so it doesn't appear in the generated bindings.
+
+        if dev.io_started {
+            let name = self.name();
+            pr_warn!("%{name}: io already started\n");
+        }
+
+        dev.io_started = true;
+        unsafe { bindings::up(&mut dev.driver_input_lock) };
+    }
+
+    pub fn product_id(&self) -> u32 {
+        let dev = unsafe { &mut *self.ptr };
+
+        dev.product
+    }
+
+    pub fn hw_output_report(&mut self, buf: &mut [u8]) -> Result {
+        let len = buf.len();
+        let buf = buf.as_mut_ptr();
+        to_result(unsafe { bindings::hid_hw_output_report(self.ptr, buf, len) })
+    }
 }
+
+// TODO melse: this doesn't actually help :( think about how we can represent the lifetime of a device in rust somehow
+// impl Drop for Device {
+//     fn drop(&mut self) {
+//         let name = self.name();
+//         pr_info!("%{name}: drop -- hid_hw_close\n");
+
+//         // TODO melse: is it safe to do this if we never called `hw_open`?
+//         unsafe { bindings::hid_hw_close(self.ptr) };
+
+//         pr_info!("%{name}: drop -- hid_hw_stop\n");
+//         // TODO melse: is it safe to do this if we never called `hw_connect`?
+//         unsafe { bindings::hid_hw_stop(self.ptr) };
+//     }
+// }
 
 // SAFETY: The device returned by `raw_device` is the raw platform deggice.
 unsafe impl device::RawDevice for Device {
@@ -221,7 +325,7 @@ pub trait Driver {
 }
 
 /// Define an HID driver module.
-/// 
+///
 /// TODO: example
 #[macro_export]
 macro_rules! module_hid_driver {
